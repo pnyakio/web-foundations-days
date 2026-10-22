@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Day 4 - Writing Pad</title>
+
+    <!-- Connect our stylesheet -->
+    <link rel="stylesheet" href="style.css">
+
+    <!-- Load JavaScript after the HTML is parsed -->
+    <script src="script.js" defer></script>
+</head>
+
+<body>
+    <main class="writing-pad">
+        <header>
+            <h1>My Writing Pad</h1>
+            <p>Write, count your words, and save your draft.</p>
+        </header>
+
+        <div class="toolbar">
+            <button type="button" id="theme-toggle">Dark mode</button>
+            <button type="button" id="clear-btn">Clear</button>
+        </div>
+
+        <label for="note-text">Your draft</label>
+        <textarea id="note-text" rows="10" maxlength="5000" placeholder="Start writing here..."></textarea>
+
+        <div class="counters">
+            <p id="char-count">0 / 200 characters</p>
+            <p id="word-count">0 words</p>
+        </div>
+
+        <p class="hint">Your draft is saved automatically in this browser. Press Escape to clear it.</p>
+    </main>
+</body>
+
+</html>

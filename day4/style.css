@@ -1,0 +1,110 @@
+/* 1. Default light theme colours */
+:root {
+    --page-bg: #f0fdf4;
+    --card-bg: #ffffff;
+    --text-color: #1f2937;
+    --border-color: #d1d5db;
+    --accent-color: #166534;
+}
+
+/* 2. Dark theme changes only the variables */
+body.dark {
+    --page-bg: #111827;
+    --card-bg: #1f2937;
+    --text-color: #f9fafb;
+    --border-color: #4b5563;
+    --accent-color: #86efac;
+}
+
+/* 3. General page styling */
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    padding: 24px;
+    font-family: Arial, sans-serif;
+    background-color: var(--page-bg);
+    color: var(--text-color);
+    transition: background-color 0.2s, color 0.2s;
+}
+
+.writing-pad {
+    max-width: 750px;
+    margin: 30px auto;
+    padding: 24px;
+    background-color: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+}
+
+header h1 {
+    color: var(--accent-color);
+}
+
+.toolbar {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin: 20px 0;
+}
+
+button {
+    padding: 10px 16px;
+    border: none;
+    border-radius: 6px;
+    background-color: var(--accent-color);
+    color: #ffffff;
+    cursor: pointer;
+}
+
+label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: bold;
+}
+
+textarea {
+    width: 100%;
+    padding: 14px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background-color: var(--card-bg);
+    color: var(--text-color);
+    font: inherit;
+    line-height: 1.6;
+    resize: vertical;
+}
+
+textarea:focus {
+    outline: 2px solid var(--accent-color);
+    outline-offset: 2px;
+}
+
+.counters {
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.counters p {
+    font-size: 0.9rem;
+}
+
+.hint {
+    color: var(--text-color);
+    font-size: 0.85rem;
+    opacity: 0.8;
+}
+
+/* 4. Character counter warning states */
+.warning {
+    color: #c56a00;
+}
+
+.over {
+    color: #dc2626;
+    font-weight: bold;
+}
