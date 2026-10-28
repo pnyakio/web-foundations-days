@@ -367,6 +367,202 @@ Sending confirmation emails during the checkout request can delay the customer's
 
 **Decision:** Confirm the purchase only after the order and seat allocation are safely committed. Send emails asynchronously, with retries and a dead-letter queue for jobs that repeatedly fail. The customer can view their confirmed ticket in the application even if email delivery is delayed.
 
+## 7. Database Schema and Seat-Locking Transactions
+
+This section provides PostgreSQL schema definitions and example SQL transactions for implementing TicketHub's seat reservation process.
+
+### 7.1 Database schema
+
+The database uses primary keys to identify records, foreign keys to maintain relationships, and unique constraints to prevent duplicate seat allocations.
+
+```sql
+CREATE TABLE users (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name VARCHAR(150) NOT NULL,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE events (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name VARCHAR(200) NOT NULL,
+    venue VARCHAR(200) NOT NULL,
+    event_date TIMESTAMPTZ NOT NULL,
+    status VARCHAR(20) NOT NULL
+        CHECK (status IN ('draft', 'on_sale', 'cancelled', 'completed'))
+);
+
+CREATE TABLE orders (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id),
+    status VARCHAR(20) NOT NULL
+        CHECK (status IN ('pending', 'paid', 'failed', 'cancelled')),
+    total_amount NUMERIC(12, 2) NOT NULL CHECK (total_amount >= 0),
+    idempotency_key VARCHAR(100) NOT NULL,
+    payment_reference VARCHAR(200) UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (user_id, idempotency_key)
+);
+
+CREATE TABLE seats (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    event_id BIGINT NOT NULL REFERENCES events(id),
+    seat_label VARCHAR(30) NOT NULL,
+    price NUMERIC(12, 2) NOT NULL CHECK (price >= 0),
+    status VARCHAR(20) NOT NULL DEFAULT 'available'
+        CHECK (status IN ('available', 'held', 'sold')),
+    held_by_user_id BIGINT REFERENCES users(id),
+    hold_expires_at TIMESTAMPTZ,
+    UNIQUE (event_id, seat_label)
+);
+
+CREATE TABLE order_items (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    order_id BIGINT NOT NULL REFERENCES orders(id),
+    seat_id BIGINT NOT NULL REFERENCES seats(id),
+    price_at_purchase NUMERIC(12, 2) NOT NULL
+        CHECK (price_at_purchase >= 0),
+    UNIQUE (seat_id)
+);
+
+CREATE INDEX idx_events_date ON events(event_date);
+CREATE INDEX idx_seats_event_status ON seats(event_id, status);
+CREATE INDEX idx_orders_user_created ON orders(user_id, created_at);
+```
+
+**Why these constraints matter:**
+
+- `UNIQUE (event_id, seat_label)` prevents duplicate records for the same physical seat at an event.
+- `UNIQUE (seat_id)` in `order_items` prevents the same seat from being allocated to two different order items, including across different orders.
+- Foreign keys ensure that seats belong to existing events, orders belong to existing users, and order items reference valid seats and orders.
+- The idempotency key prevents a client retry from creating duplicate orders for the same user and operation.
+- The seat status and expiration timestamp represent temporary holds separately from confirmed sales.
+
+The `UNIQUE (seat_id)` constraint is a final safeguard, but it is not enough by itself. The application must also manage temporary holds and payment confirmation correctly.
+
+### 7.2 Transaction for holding seats
+
+Suppose user `17` wants seats `105` and `106` for event `42`. Each hold lasts ten minutes.
+
+The application begins a transaction and locks the requested seat rows in a consistent order:
+
+```sql
+BEGIN;
+
+SELECT id, status, held_by_user_id, hold_expires_at
+FROM seats
+WHERE event_id = 42
+  AND id IN (105, 106)
+ORDER BY id
+FOR UPDATE;
+```
+
+`FOR UPDATE` locks the selected rows until the transaction commits or rolls back. If another transaction is modifying one of these rows, the competing transaction must wait for the lock to be released.
+
+The application then attempts to hold only seats that are available or whose previous holds have expired:
+
+```sql
+UPDATE seats
+SET status = 'held',
+    held_by_user_id = 17,
+    hold_expires_at = CURRENT_TIMESTAMP + INTERVAL '10 minutes'
+WHERE event_id = 42
+  AND id IN (105, 106)
+  AND (
+      status = 'available'
+      OR (
+          status = 'held'
+          AND hold_expires_at <= CURRENT_TIMESTAMP
+      )
+  )
+RETURNING id;
+```
+
+**The application must check the result before committing.**
+
+- If exactly two rows are returned, both requested seats were held successfully. The application commits the transaction.
+- If fewer than two rows are returned, at least one seat was missing or unavailable. The application rolls back the transaction so that it does not leave a partial hold.
+
+Successful case:
+
+```sql
+COMMIT;
+```
+
+Failure case:
+
+```sql
+ROLLBACK;
+```
+
+The row locks and conditional update prevent two concurrent requests from successfully claiming the same available seat. The transaction ensures that a request for multiple seats succeeds as a group or fails as a group.
+
+The application should also verify that the number of selected rows matches the number of distinct requested seat IDs. The examples use fixed IDs for clarity; production code should use parameterised queries.
+
+### 7.3 Transaction for confirming a purchase
+
+Payment must be processed through the payment provider without keeping database locks open while waiting for a network response.
+
+Once the payment provider confirms payment, the application starts a new transaction. It locks the seats and verifies that they are still held by the purchasing user and that the hold has not expired.
+
+```sql
+BEGIN;
+
+SELECT id, status, held_by_user_id, hold_expires_at
+FROM seats
+WHERE id IN (105, 106)
+ORDER BY id
+FOR UPDATE;
+```
+
+The application checks that both seats are held by user `17` and that both holds remain valid. If either check fails, the transaction must not mark the seats as sold.
+
+The application then changes the seat states conditionally:
+
+```sql
+UPDATE seats
+SET status = 'sold',
+    held_by_user_id = NULL,
+    hold_expires_at = NULL
+WHERE id IN (105, 106)
+  AND status = 'held'
+  AND held_by_user_id = 17
+  AND hold_expires_at > CURRENT_TIMESTAMP
+RETURNING id;
+```
+
+Only if both seats are returned does the application insert the order items and mark the order as paid:
+
+```sql
+INSERT INTO order_items (order_id, seat_id, price_at_purchase)
+VALUES
+    (9001, 105, 2500.00),
+    (9001, 106, 2500.00);
+
+UPDATE orders
+SET status = 'paid'
+WHERE id = 9001
+  AND user_id = 17
+  AND status = 'pending';
+
+COMMIT;
+```
+
+These statements represent the success path. The application must verify that both seats were updated and exactly one pending order was updated. If any check fails, it must roll back the entire transaction rather than commit a partial result. The example assumes order `9001` was created previously and that the payment provider has confirmed the corresponding payment.
+
+### 7.4 Handling concurrency and failures
+
+If two users request the same seat simultaneously, the first transaction to lock and successfully hold that seat wins. The second transaction waits, then checks the updated state and cannot acquire the same seat while the first hold remains valid.
+
+If a hold expires, another user can acquire the seat through the same locking and conditional-update process. Expiration alone does not release a seat; the next hold request or a background cleanup process must update its state safely.
+
+If payment fails, the application releases seats only after checking that they are still held by the relevant user and have not been sold. Payment confirmations must be idempotent, and the system needs a recovery process for cases where payment succeeds but order finalisation fails.
+
+The application must never hold a database transaction open while a customer is completing payment. This reduces lock contention during the popular sale and allows more customers to compete for seats safely.
+
+**Conclusion:** TicketHub combines row-level locking, short transactions, conditional updates, expiration checks, unique constraints, and idempotent payment handling. The database is the authority on seat ownership, ensuring that concurrent requests cannot successfully sell the same seat twice.
+
 ### Conclusion
 
 TicketHub must handle ordinary browsing efficiently while protecting seat allocation and payments during sudden demand spikes. The key design principle is to scale read-heavy operations independently while relying on database transactions and constraints for purchase correctness. A waiting room controls traffic, but only an atomic and consistent seat-allocation process can reliably prevent double-booking.
